@@ -36,6 +36,25 @@ Emacs 27.1以降が対象です。ローカルではEmacs 31.1で8件のERTテ�
 
 結果の件数は `(setq choicel-max-results 20)` で変更できます。
 
+## 辞書の編集
+
+辞書は `choicel-dictionary.el` に分離しています。検索処理を変更せず、2つのリストを編集できます。
+
+- `choicel-synonyms`: 表現と検索用英単語の対応。例えば `("履歴" . "history log")` をリスト内に追加します。
+- `choicel-intent-hints`: 表現と優先するコマンドの対応。例えば `("履歴" . (magit-log-current vc-print-log))` をリスト内に追加します。左側はEmacsの正規表現、右側は優先順です。存在しないコマンドは候補に追加されません。
+
+編集後は保存してください。既に読み込み済みの場合、変更した `defcustom` の定義内で `C-M-x`（Ctrl+Alt+x）を押すと現在の値も更新できます。通常の `eval-buffer` だけでは `defcustom` の既存値は更新されません。その後 `M-x choicel` で検索し直します。
+
+個人用の追加は、辞書を変更せず、設定ファイルの `(require 'choicel)` より後ろに書くこともできます。
+
+```elisp
+(add-to-list 'choicel-synonyms '("履歴" . "history log"))
+(add-to-list 'choicel-intent-hints
+             '("履歴" . (magit-log-current vc-print-log)))
+```
+
+`M-x customize-group` → `choicel` からも編集・保存できます。
+
 ## 開発とデバッグの基本
 
 `.el` はEmacs Lispのソースファイルです。ファイル末尾の `(provide 'choicel)` がパッケージ名を公開し、利用側の `(require 'choicel)` がそれを読み込みます。先頭の `lexical-binding: t` は変数の扱いを明確にする設定です。公開関数は `choicel-`、内部関数は `choicel--` で始めています。

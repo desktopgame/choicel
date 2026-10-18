@@ -7,4 +7,4 @@ jobs:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y emacs-nox
       - run: emacs -Q --batch -L . -l test/choicel-test.el -f ert-run-tests-batch-and-exit
-      - run: emacs -Q --batch -L . --eval '(setq byte-compile-error-on-warn t)' -f batch-byte-compile choicel.el
+      - run: emacs -Q --batch -L . --eval '(setq byte-compile-error-on-warn t)' -f batch-byte-compile choicel-dictionary.el choicel.el
