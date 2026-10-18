@@ -6,7 +6,7 @@
 
 ;;; Commentary:
 ;; Run M-x choicel to find loaded commands and their current bindings.
-;; Results open help; they never execute the recommended command.
+;; Results open help by default; explicit actions can execute a command.
 
 ;;; Code:
 
@@ -22,10 +22,68 @@
   :group 'choicel
   :type 'natnum)
 
+(defcustom choicel-display-style 'normal
+  "How to display results, independently of action and key bindings.
+Normal follows Emacs display rules.  Full-frame temporarily uses one window."
+  :group 'choicel :type '(choice (const normal) (const full-frame)))
+
+(defcustom choicel-default-action 'help
+  "Action taken by `choicel-default-action' on the selected result."
+  :group 'choicel :type '(choice (const help) (const execute)))
+
 (defvar-local choicel--source-buffer nil)
 (defvar-local choicel--query nil)
 (defvar-local choicel--cancel-search nil)
 (defvar-local choicel--search-token nil)
+(defvar-local choicel--window-configuration nil)
+(defvar-local choicel--source-window nil)
+
+(defun choicel--restore-layout ()
+  "Cancel pending work and restore the search's original layout."
+  (let ((configuration choicel--window-configuration)
+        (buffer (current-buffer)))
+    (choicel--cancel-pending)
+    (setq choicel--window-configuration nil)
+    (if (and (window-configuration-p configuration)
+             (frame-live-p (window-configuration-frame configuration)))
+        (set-window-configuration configuration)
+      (let ((window (get-buffer-window buffer)))
+        (when window (quit-window nil window))))))
+
+(defun choicel-quit ()
+  "Close the results view and restore the original window layout."
+  (interactive)
+  (choicel--restore-layout))
+
+(defun choicel-execute-command (prefix)
+  "Restore the source context, then interactively execute the selected command.
+Pass PREFIX to the command, including prompts for its normal arguments."
+  (interactive "P")
+  (let ((command (tabulated-list-get-id))
+        (source choicel--source-buffer)
+        (window choicel--source-window))
+    (unless (and command (commandp command))
+      (user-error "Select a command row first"))
+    (unless (buffer-live-p source)
+      (user-error "The original buffer has been closed"))
+    (choicel--restore-layout)
+    (cond ((and (window-live-p window) (eq (window-buffer window) source))
+           (select-window window))
+          ((get-buffer-window source t)
+           (select-window (get-buffer-window source t)))
+          (t (switch-to-buffer source)))
+    (let ((current-prefix-arg prefix)
+          (this-command command)
+          (real-this-command command))
+      (call-interactively command))))
+
+(defun choicel-default-action (prefix)
+  "Perform the configured default action, passing PREFIX when executing."
+  (interactive "P")
+  (pcase choicel-default-action
+    ('help (choicel-describe-command))
+    ('execute (choicel-execute-command prefix))
+    (_ (user-error "Unknown choicel default action"))))
 
 (defun choicel--cancel-pending ()
   "Cancel work belonging to this results buffer."
@@ -36,7 +94,8 @@
   "Cancel System One search and keep the current keyword results."
   (interactive)
   (choicel--cancel-pending)
-  (setq header-line-format "System One cancelled | Keyword results | g: search  q: quit"))
+  (setq header-line-format
+        (concat "System One cancelled | Keyword results | " (choicel--action-hints))))
 
 (defun choicel--commands ()
   "Collect loaded commands and registered interactive autoloads.
@@ -121,13 +180,16 @@ Do not load packages merely to index their commands."
 (defvar choicel-results-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map tabulated-list-mode-map)
-    (define-key map (kbd "RET") #'choicel-describe-command)
+    (define-key map (kbd "RET") #'choicel-default-action)
+    (define-key map (kbd "h") #'choicel-describe-command)
+    (define-key map (kbd "e") #'choicel-execute-command)
+    (define-key map (kbd "q") #'choicel-quit)
     (define-key map (kbd "C-c C-k") #'choicel-cancel-search)
     (define-key map (kbd "g") #'choicel-search-again)
     map))
 
 (define-derived-mode choicel-results-mode tabulated-list-mode "Choicel"
-  "Command search results.  RET opens help, g searches again, q quits."
+  "Command results.  RET uses the default action; h helps, e executes, q quits."
   (setq tabulated-list-format [("Command" 36 t) ("Keys" 22 t) ("Description" 0 t)])
   (setq tabulated-list-padding 2)
   (tabulated-list-init-header))
@@ -135,8 +197,8 @@ Do not load packages merely to index their commands."
 (defun choicel--render (results label)
   "Display RESULTS with LABEL in the current results buffer."
   (setq header-line-format
-        (format "%s: %s | %d results | RET: help  g: search  q: quit"
-                label choicel--query (length results))
+        (format "%s: %s | %d results | %s"
+                label choicel--query (length results) (choicel--action-hints))
         tabulated-list-entries
         (mapcar (lambda (row)
                   (list (car row)
@@ -146,15 +208,40 @@ Do not load packages merely to index their commands."
                 results))
   (tabulated-list-print t))
 
+(defun choicel--action-hints ()
+  "Describe current action bindings, including user remappings."
+  (mapconcat
+   (lambda (pair)
+     (let ((key (where-is-internal (car pair) (current-local-map) t)))
+       (format "%s: %s" (if key (key-description key) "M-x") (cdr pair))))
+   `((choicel-default-action . ,(format "default (%s)" choicel-default-action))
+     (choicel-describe-command . "help") (choicel-execute-command . "execute")
+     (choicel-search-again . "search") (choicel-quit . "quit"))
+   "  "))
+
 ;;;###autoload
 (defun choicel (query)
-  "Find commands matching QUERY without executing them.
+  "Find commands matching QUERY, displaying them for an explicit user action.
 Use the invoking buffer's active keymaps.  Include registered autoloads."
   (interactive (list (read-string "What do you want to do? ")))
   (when (string-empty-p (string-trim query)) (user-error "Enter a search phrase"))
-  (let* ((source (if (and (derived-mode-p 'choicel-results-mode)
+  (let* ((caller (current-buffer))
+         (view (window-buffer (selected-window)))
+         (continuing (and (buffer-live-p view)
+                          (with-current-buffer view
+                            (and (derived-mode-p 'choicel-results-mode)
+                                 choicel--window-configuration
+                                 (or (eq caller view)
+                                     (eq choicel--source-buffer caller))))))
+         (source (if (and (derived-mode-p 'choicel-results-mode)
                           (buffer-live-p choicel--source-buffer))
                      choicel--source-buffer (current-buffer)))
+         (configuration (if continuing
+                            (buffer-local-value 'choicel--window-configuration view)
+                          (current-window-configuration)))
+         (source-window (if continuing
+                            (buffer-local-value 'choicel--source-window view)
+                          (selected-window)))
          (commands (choicel--commands))
          (results (with-current-buffer source (choicel--search query commands)))
          (context (with-current-buffer source
@@ -169,11 +256,15 @@ Use the invoking buffer's active keymaps.  Include registered autoloads."
       (choicel--cancel-pending)
       (choicel-results-mode)
       (setq choicel--source-buffer source choicel--query query
+            choicel--window-configuration configuration
+            choicel--source-window source-window
             choicel--search-token token)
       (add-hook 'kill-buffer-hook #'choicel--cancel-pending nil t)
       (add-hook 'change-major-mode-hook #'choicel--cancel-pending nil t)
       (choicel--render results "Keyword search"))
-    (pop-to-buffer buffer)
+    (if (eq choicel-display-style 'full-frame)
+        (progn (switch-to-buffer buffer) (delete-other-windows))
+      (pop-to-buffer buffer))
     (when (and (memq choicel-backend '(auto systemone))
                (or choicel-systemone-url (eq choicel-backend 'systemone)))
       (with-current-buffer buffer

@@ -85,4 +85,85 @@
     (should-not (assq 'magit-status (choicel--search "gitを開きたい"
                                            '((vc-dir "Version control")))))))
 
+(ert-deftest choicel-display-and-action-are-independent ()
+  (dolist (style '(normal full-frame))
+    (dolist (action '(help execute))
+      (let ((choicel-display-style style)
+            (choicel-default-action action)
+            (choicel-backend 'builtin)
+            described executed)
+        (save-window-excursion
+          (delete-other-windows)
+          (with-temp-buffer
+            (switch-to-buffer (current-buffer))
+            (insert "source context")
+            (goto-char 5)
+            (let* ((source (current-buffer))
+                   (original (selected-window))
+                   (_other (split-window-right))
+                   (configuration (current-window-configuration)))
+              (cl-letf (((symbol-function 'choicel--commands)
+                         (lambda () '((choicel-test-command "Test"))))
+                        ((symbol-function 'describe-function)
+                         (lambda (command &rest _) (setq described command)))
+                        ((symbol-function 'choicel-test-command)
+                         (lambda (prefix)
+                           (interactive "P")
+                           (should (eq (current-buffer) source))
+                           (should (eq (selected-window) original))
+                           (should (= (point) 5))
+                           (should (= (length (window-list)) 2))
+                           (should (equal prefix '(4)))
+                           (setq executed t))))
+                (choicel "test")
+                (when (eq style 'full-frame)
+                  (should (= (length (window-list)) 1)))
+                (choicel-default-action '(4))
+                (if (eq action 'help)
+                    (progn
+                      (should (eq described 'choicel-test-command))
+                      (should-not executed)
+                      (choicel-quit))
+                  (should executed)
+                  (should-not described))
+                (should (compare-window-configurations
+                         configuration (current-window-configuration))))))
+          (when (get-buffer "*choicel*") (kill-buffer "*choicel*")))))))
+
+(ert-deftest choicel-research-keeps-original-layout ()
+  (let ((choicel-display-style 'full-frame) (choicel-backend 'builtin))
+    (save-window-excursion
+      (delete-other-windows)
+      (with-temp-buffer
+        (switch-to-buffer (current-buffer))
+        (split-window-right)
+        (let ((configuration (current-window-configuration)))
+          (choicel "split window")
+          (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "save file")))
+            (choicel-search-again))
+          (should (= (length (window-list)) 1))
+          (choicel-quit)
+          (should (compare-window-configurations
+                   configuration (current-window-configuration)))))
+      (when (get-buffer "*choicel*") (kill-buffer "*choicel*")))))
+
+(ert-deftest choicel-keys-are-customizable ()
+  (with-temp-buffer
+    (choicel-results-mode)
+    (use-local-map (copy-keymap choicel-results-mode-map))
+    (should (eq (key-binding (kbd "RET")) #'choicel-default-action))
+    (define-key (current-local-map) (kbd "e") nil)
+    (define-key (current-local-map) (kbd "x") #'choicel-execute-command)
+    (should (eq (key-binding (kbd "x")) #'choicel-execute-command))
+    (should (string-match-p "x: execute" (choicel--action-hints)))))
+
+(ert-deftest choicel-does-not-execute-with-dead-source ()
+  (with-temp-buffer
+    (choicel-results-mode)
+    (setq choicel--source-buffer (generate-new-buffer " *choicel-dead-source*"))
+    (kill-buffer choicel--source-buffer)
+    (setq tabulated-list-entries '((ignore ["ignore" "" "Ignore"])))
+    (tabulated-list-print t)
+    (should-error (choicel-execute-command nil) :type 'user-error)))
+
 ;;; choicel-test.el ends here
