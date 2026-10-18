@@ -2,14 +2,14 @@
 
 自然言語のキーワードから、今のEmacsで使えるコマンドとキーバインドを探すパッケージです。候補の操作は実行せず、ヘルプを開きます。
 
-現在は開発の第一段階です。APIなしの検索・日本語の簡単な同義語・結果表示・ヘルプ移動を実装しています。SystemOne、非同期HTTP、全件チャンク評価は未実装です。日本語の意味理解は行いません。見つからない場合は `split window` など英語のキーワードを試してください。
+APIなしのキーワード検索に加え、任意のSystem Oneバックエンドを利用できます。APIなしでは日本語の簡単な辞書を使い、意味理解は行いません。System Oneでは全候補を分割評価し、各組の上位候補を再評価します。候補の操作は自動実行しません。
 
 ## 初めて試す
 
-Emacs 27.1以降が対象です。ローカルではEmacs 31.1で8件のERTテストと警告なしのバイトコンパイル、Diredでのキー取得を確認しました。27.1での実行は未確認です。追加パッケージは不要です。
+Emacs 27.1以降が対象です。ローカルではEmacs 31.1で17件のERTテストと警告なしのバイトコンパイル、Diredでのキー取得を確認しました。27.1での実行は未確認です。追加パッケージは不要です。
 
 1. Emacsで `C-x C-f` を押し、このフォルダの `choicel.el` を開きます。
-2. `M-x eval-buffer` と入力してEnterを押します。ファイルの定義がEmacsに読み込まれます。
+2. `M-:` で `(add-to-list 'load-path "C:/Users/dansaka/Work/Repository/choicel")` を入力してEnterを押し、次に `M-x eval-buffer` を実行します。別ファイルの辞書とSystem One機能も読み込まれます。
 3. `C-x b` で普段のバッファへ移動します。
 4. `M-x choicel` と入力してEnterを押します。
 5. `ウィンドウを左右に分割したい` または `split window` を入力します。
@@ -73,11 +73,50 @@ ERTはEmacsに標準搭載されたテスト機能です。Emacsで本体を読�
 PowerShellから設定の影響を除いて実行する場合は、リポジトリのフォルダで次を使います。`emacs` が見つからなければ実行ファイルのフルパスに置き換えます。
 
 ```powershell
-emacs -Q --batch -L . -l test/choicel-test.el -f ert-run-tests-batch-and-exit
+emacs -Q --batch -L . -l test/choicel-test.el -l test/choicel-systemone-test.el -f ert-run-tests-batch-and-exit
 ```
 
 `-Q` は個人設定を読み込まない指定です。テストではコマンド列挙、ローカルキーの優先と上書き、検索順位、日本語ヒント、結果件数、候補を実行しないことを確認します。
 
+## System Oneの設定
+
+接続先の種類を選ぶ必要はありません。System OneのHTTP形式に対応していればURLを指定して利用できます。通常のチャット用APIとは形式が違います。ホスト型サービスでは正確なモデルIDも指定してください。
+
+設定はパッケージのファイルに書かず、自分の `.emacs.d/local.el` に置けます。`init.el` から `local.el` を読み込む例です。既に同じ読み込みがあれば重複して追加する必要はありません。
+
+```elisp
+(load (expand-file-name "local.el" user-emacs-directory) t t)
+```
+
+`local.el` の例（URLとモデル名は自分の接続先に合わせて変更）：
+
+```elisp
+(setq choicel-backend 'auto
+      choicel-systemone-url "http://localhost:8080/v1/systemone"
+      choicel-systemone-model nil
+      choicel-systemone-api-key
+      (lambda () (getenv "SYSTEM_ONE_API_KEY")))
+```
+
+これらはEmacs全体で参照できる変数です。`.emacs.d` 側で `setq` すると、パッケージは検索時にその値を読みます。パッケージの読み込み前でも後でも設定できます。接続情報をパッケージのリポジトリに入れる必要はありません。
+
+キーが不要なローカルサーバーなら `choicel-systemone-api-key` は `nil` で構いません。環境変数はEmacsの起動時に引き継がれます。後からWindows側で変更した場合はEmacsを再起動するか、Emacs内で `setenv` を使って反映します。個人用 `local.el` でキー文字列を直接指定することもできますが、そのファイルを共有・コミットしないでください。パッケージはキーを保存したり、診断メッセージに表示したりしません。
+
+- `choicel-backend`: `builtin` は通信なし、`auto` はURLがあればAPIを使用、`systemone` はAPIを試行。どちらもAPI障害時は通常検索に切り替わります。
+- `choicel-systemone-chunk-size`: 1回のChoiceの候補数。初期値32。モデルの候補数・コンテキスト上限に合わせて減らしてください。
+- `choicel-systemone-survivors`: 各組から残す候補数と最終結果数。初期値3。チャンクサイズ未満にします。
+- `choicel-max-concurrent-requests`: 同時HTTP通信数。初期値4。サーバーでの実際の並列推論数とは異なります。
+- `choicel-systemone-timeout`: リクエストごとの制限時間。初期値30秒。
+- `choicel-systemone-description-length`: 送信するコマンド説明の最大文字数。初期値160。
+
+検索中もキーワード検索の結果を表示します。`C-c C-k` でAPI検索を中止できます。`g` や新しい検索は古い通信を中止し、結果バッファを破棄した場合も中止します。`q` は画面を閉じる操作なので、通信の中止には `C-c C-k` を使ってください。
+
+送信するのは質問、モード名、コマンド名と短い説明です。編集中の文書の内容は送信しません。全候補を評価するため、登録数によっては多数のリクエストになります。ホスト型APIの料金やレート制限は接続先の条件に従います。自動リトライは行いません。複数組の確率を直接比較せず、残った候補を次のChoiceで比較します。
+
+API形式は2026-10-18に確認した [llama.cpp公式仕様](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md#post-v1systemone-typesafe-compatible-system-one-api) と [System One APIリファレンス](https://docs.system-one.dev/en/docs/api) に基づきます。リクエストは `state` と `questions.command`、応答は `answers.command.choice` と `probabilities` を使います。バージョン・モデルごとの制約は共通ではないため、設定値を接続先に合わせてください。
+
+ローカルの模擬APIに対する実HTTP通信、日本語とBearerヘッダーの送信、非同期集約、重複コールバック、キャンセル、タイムアウト、壊れた応答、通常検索への切り替えを検証しています。実モデルに対する接続・検索精度・速度は未検証です。HTTPの検証は `python test/http-smoke.py` で実行できます。
+
 ## 次の開発段階
 
-SystemOneは対象のllama.cpp実装・バージョンとAPI形式を確認してから追加します。`init.md` 内のURLは暫定案なので、現在の設定には追加しないでください。ライセンスと配布方法も未決定です。
+実際のSystem One接続先で、候補数・通過数を調整し、精度・応答時間・リクエスト数を測定します。ライセンスと配布方法も未決定です。

@@ -15,6 +15,7 @@
 (require 'tabulated-list)
 
 (require 'choicel-dictionary)
+(require 'choicel-systemone)
 
 (defcustom choicel-max-results 30
   "Maximum number of search results."
@@ -23,6 +24,19 @@
 
 (defvar-local choicel--source-buffer nil)
 (defvar-local choicel--query nil)
+(defvar-local choicel--cancel-search nil)
+(defvar-local choicel--search-token nil)
+
+(defun choicel--cancel-pending ()
+  "Cancel work belonging to this results buffer."
+  (when choicel--cancel-search (funcall choicel--cancel-search))
+  (setq choicel--cancel-search nil choicel--search-token nil))
+
+(defun choicel-cancel-search ()
+  "Cancel System One search and keep the current keyword results."
+  (interactive)
+  (choicel--cancel-pending)
+  (setq header-line-format "System One cancelled | Keyword results | g: search  q: quit"))
 
 (defun choicel--commands ()
   "Collect loaded commands and registered interactive autoloads.
@@ -108,6 +122,7 @@ Do not load packages merely to index their commands."
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map tabulated-list-mode-map)
     (define-key map (kbd "RET") #'choicel-describe-command)
+    (define-key map (kbd "C-c C-k") #'choicel-cancel-search)
     (define-key map (kbd "g") #'choicel-search-again)
     map))
 
@@ -117,33 +132,78 @@ Do not load packages merely to index their commands."
   (setq tabulated-list-padding 2)
   (tabulated-list-init-header))
 
+(defun choicel--render (results label)
+  "Display RESULTS with LABEL in the current results buffer."
+  (setq header-line-format
+        (format "%s: %s | %d results | RET: help  g: search  q: quit"
+                label choicel--query (length results))
+        tabulated-list-entries
+        (mapcar (lambda (row)
+                  (list (car row)
+                        (vector (symbol-name (car row))
+                                (if (string-empty-p (nth 2 row)) "—" (nth 2 row))
+                                (or (nth 3 row) ""))))
+                results))
+  (tabulated-list-print t))
+
 ;;;###autoload
 (defun choicel (query)
   "Find commands matching QUERY without executing them.
 Use the invoking buffer's active keymaps.  Include registered autoloads."
   (interactive (list (read-string "What do you want to do? ")))
   (when (string-empty-p (string-trim query)) (user-error "Enter a search phrase"))
-  (let* ((source (current-buffer))
-         (results (choicel--search query (choicel--commands)))
-         (buffer (get-buffer-create "*choicel*")))
+  (let* ((source (if (and (derived-mode-p 'choicel-results-mode)
+                          (buffer-live-p choicel--source-buffer))
+                     choicel--source-buffer (current-buffer)))
+         (commands (choicel--commands))
+         (results (with-current-buffer source (choicel--search query commands)))
+         (context (with-current-buffer source
+                    `((major_mode . ,(symbol-name major-mode))
+                      (minor_modes . ,(vconcat
+                                      (cl-loop for mode in minor-mode-list
+                                               when (and (boundp mode) (symbol-value mode))
+                                               collect (symbol-name mode)))))))
+         (buffer (get-buffer-create "*choicel*"))
+         (token (make-symbol "choicel-search")))
     (with-current-buffer buffer
+      (choicel--cancel-pending)
       (choicel-results-mode)
-      (setq choicel--source-buffer source
-            choicel--query query
-            header-line-format
-            (format "Keyword search: %s | %d results | RET: help  g: search  q: quit"
-                    query (length results))
-            tabulated-list-entries
-            (mapcar (lambda (row)
-                      (list (car row)
-                            (vector (symbol-name (car row))
-                                    (if (string-empty-p (nth 2 row)) "—" (nth 2 row))
-                                    (or (nth 3 row) ""))))
-                    results))
-      (tabulated-list-print t))
+      (setq choicel--source-buffer source choicel--query query
+            choicel--search-token token)
+      (add-hook 'kill-buffer-hook #'choicel--cancel-pending nil t)
+      (add-hook 'change-major-mode-hook #'choicel--cancel-pending nil t)
+      (choicel--render results "Keyword search"))
     (pop-to-buffer buffer)
-    (unless results
-      (message "No keyword matches. Try English terms such as split window or save file."))))
+    (when (and (memq choicel-backend '(auto systemone))
+               (or choicel-systemone-url (eq choicel-backend 'systemone)))
+      (with-current-buffer buffer
+        (setq header-line-format "System One searching… | Keyword results below | C-c C-k: cancel"))
+      (let ((cancel
+             (choicel-systemone-search
+              query context commands
+              (lambda (entries failure)
+                (when (and (buffer-live-p buffer)
+                           (eq token (buffer-local-value 'choicel--search-token buffer)))
+                  (let ((rows
+                         (when (and (not failure) (buffer-live-p source))
+                           (with-current-buffer source
+                             (cl-loop for entry in entries
+                                      when (commandp (car entry))
+                                      collect (list (car entry) 0
+                                                    (choicel--bindings (car entry))
+                                                    (car (split-string (cadr entry) "\n"))))))))
+                    (with-current-buffer buffer
+                      (setq choicel--cancel-search nil)
+                      (if (or failure (not (buffer-live-p source)))
+                          (choicel--render results
+                                           (format "Keyword fallback (%s)"
+                                                   (or failure "Source buffer closed")))
+                        (choicel--render
+                         (cl-subseq rows 0 (min choicel-max-results (length rows)))
+                         "System One")))))))))
+        (when (and (buffer-live-p buffer)
+                   (eq token (buffer-local-value 'choicel--search-token buffer)))
+          (with-current-buffer buffer (setq choicel--cancel-search cancel)))))))
 
 (provide 'choicel)
 ;;; choicel.el ends here
