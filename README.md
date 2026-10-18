@@ -6,7 +6,7 @@ APIなしのキーワード検索に加え、任意のSystem Oneバックエン�
 
 ## 初めて試す
 
-Emacs 27.1以降が対象です。ローカルではEmacs 31.1で24件のERTテストと警告なしのバイトコンパイル、Diredでのキー取得を確認しました。27.1での実行は未確認です。追加パッケージは不要です。
+Emacs 27.1以降が対象です。ローカルではEmacs 31.1で26件のERTテストと警告なしのバイトコンパイル、Diredでのキー取得を確認しました。27.1での実行は未確認です。追加パッケージは不要です。
 
 1. Emacsで `C-x C-f` を押し、このフォルダの `choicel.el` を開きます。
 2. `M-:` で `(add-to-list 'load-path "C:/Users/dansaka/Work/Repository/choicel")` を入力してEnterを押し、次に `M-x eval-buffer` を実行します。別ファイルの辞書とSystem One機能も読み込まれます。
@@ -152,6 +152,22 @@ emacs -Q --batch -L . -l test/choicel-test.el -l test/choicel-systemone-test.el 
 API形式は2026-10-18に確認した [llama.cpp公式仕様](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md#post-v1systemone-typesafe-compatible-system-one-api) と [System One APIリファレンス](https://docs.system-one.dev/en/docs/api) に基づきます。リクエストは `state` と `questions.command`、応答は `answers.command.choice` と `probabilities` を使います。バージョン・モデルごとの制約は共通ではないため、設定値を接続先に合わせてください。
 
 ローカルの模擬APIに対する実HTTP通信、日本語とBearerヘッダーの送信、非同期集約、重複コールバック、キャンセル、タイムアウト、壊れた応答、通常検索への切り替えを検証しています。実モデルに対する接続・検索精度・速度は未検証です。HTTPの検証は `python test/http-smoke.py` で実行できます。
+
+## 検索時間を計測する
+
+通常どおり `M-x choicel` で検索した後、`M-x choicel-show-last-search-metrics` を実行してください。追加のAPI通信なしで、最後の検索の計測結果を表示します。計測は自動で行い、メモリ内の最新1件だけを保持します。
+
+- `Command collection`: コマンド名と説明の収集時間。
+- `Keyword search + keys`: 通常検索とその候補のキー取得時間。
+- `System One elapsed`: 分割・全通信・候補検証・再評価を含むAPI処理全体の経過時間。
+- `Final keys + display`: 最終候補のキー取得と結果表示の時間（API利用時）。
+- `Total until results ready`: 質問を確定してから候補を用意するまで。候補を選んでいる時間は含みません。
+- `Ready to minibuffer opening`: 結果が用意されてからミニバッファを開くまでの待ち時間。他のミニバッファを使用中なら長くなります。
+- 各ラウンドの候補数・経過時間と、各リクエストの候補数・所要時間・成功／失敗。開始件数と完了件数を別に示すので、中断した通信も区別できます。
+
+通信時間にはネットワーク、接続先での待ち時間、推論、応答のデコードが含まれます。サーバー内部の推論時間だけを切り分けた値ではありません。同時実行した通信の時間は重なるため、その合計が検索全体の時間になるわけではありません。質問文・接続先URL・APIキー・応答本文は記録しません。
+
+比較するなら、同じ質問で設定を1つだけ変えて数回ずつ測定してください。`choicel-max-concurrent-requests` は同時通信数、`choicel-systemone-description-length` は送る説明の長さです。並列数を増やしても接続先の待ち行列や制限で速くならないことがあり、説明を短くすると精度が変わる可能性があります。設定は自動変更しません。
 
 ## 次の開発段階
 

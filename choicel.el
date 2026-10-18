@@ -40,6 +40,7 @@ Minibuffer uses the user's completion UI without a results window."
 (defvar-local choicel--source-window nil)
 (defvar-local choicel--selection-timer nil)
 (defvar-local choicel--prefix nil)
+(defvar-local choicel--metrics nil)
 
 (defun choicel--restore-layout ()
   "Cancel pending work and restore the search's original layout."
@@ -90,6 +91,7 @@ Pass PREFIX to the command, including prompts for its normal arguments."
 
 (defun choicel--cancel-pending ()
   "Cancel work belonging to this results buffer."
+  (choicel--metrics-finish choicel--metrics 'cancelled)
   (when choicel--selection-timer (cancel-timer choicel--selection-timer))
   (setq choicel--selection-timer nil)
   (when choicel--cancel-search (funcall choicel--cancel-search))
@@ -235,6 +237,9 @@ Do not load packages merely to index their commands."
   (when (and (buffer-live-p buffer)
              (eq token (buffer-local-value 'choicel--search-token buffer)))
     (with-current-buffer buffer
+      (when (and choicel--metrics (gethash 'ready-at choicel--metrics))
+        (puthash 'selection-delay
+                 (- (float-time) (gethash 'ready-at choicel--metrics)) choicel--metrics))
       (unwind-protect
           (if (not (buffer-live-p choicel--source-buffer))
               (message "Choicel: the original buffer has been closed")
@@ -305,7 +310,9 @@ Do not load packages merely to index their commands."
 Use the invoking buffer's active keymaps.  Include registered autoloads."
   (interactive (list (read-string "What do you want to do? ")))
   (when (string-empty-p (string-trim query)) (user-error "Enter a search phrase"))
-  (let* ((caller (current-buffer))
+  (let* ((metrics (choicel--metrics-new))
+         (choicel--metrics-current metrics)
+         (caller (current-buffer))
          (view (window-buffer (selected-window)))
          (continuing (and (buffer-live-p view)
                           (with-current-buffer view
@@ -322,8 +329,12 @@ Use the invoking buffer's active keymaps.  Include registered autoloads."
          (source-window (if continuing
                             (buffer-local-value 'choicel--source-window view)
                           (selected-window)))
-         (commands (choicel--commands))
-         (results (with-current-buffer source (choicel--search query commands)))
+         (collect-start (float-time))
+         (commands (prog1 (choicel--commands)
+                     (puthash 'collect (- (float-time) collect-start) metrics)))
+         (builtin-start (float-time))
+         (results (prog1 (with-current-buffer source (choicel--search query commands))
+                    (puthash 'builtin (- (float-time) builtin-start) metrics)))
          (context (with-current-buffer source
                     `((major_mode . ,(symbol-name major-mode))
                       (minor_modes . ,(vconcat
@@ -336,6 +347,8 @@ Use the invoking buffer's active keymaps.  Include registered autoloads."
          (use-systemone (and (memq choicel-backend '(auto systemone))
                              (or choicel-systemone-url (eq choicel-backend 'systemone))))
          (token (make-symbol "choicel-search")))
+    (puthash 'commands (length commands) metrics)
+    (puthash 'backend (if use-systemone 'systemone 'builtin) metrics)
     (with-current-buffer buffer
       (choicel--cancel-pending)
       (choicel-results-mode)
@@ -343,6 +356,7 @@ Use the invoking buffer's active keymaps.  Include registered autoloads."
             choicel--window-configuration configuration
             choicel--source-window source-window
             choicel--prefix prefix
+            choicel--metrics metrics
             choicel--search-token token)
       (add-hook 'kill-buffer-hook #'choicel--cancel-pending nil t)
       (add-hook 'change-major-mode-hook #'choicel--cancel-pending nil t)
@@ -352,7 +366,9 @@ Use the invoking buffer's active keymaps.  Include registered autoloads."
           (progn (switch-to-buffer buffer) (delete-other-windows))
         (pop-to-buffer buffer)))
     (when (and minibuffer-style (not use-systemone))
+      (choicel--metrics-finish metrics 'completed)
       (choicel--minibuffer-select buffer token))
+    (unless use-systemone (choicel--metrics-finish metrics 'completed))
     (when use-systemone
       (when minibuffer-style (message "Choicel: System One searching…"))
       (with-current-buffer buffer
@@ -363,7 +379,8 @@ Use the invoking buffer's active keymaps.  Include registered autoloads."
               (lambda (entries failure)
                 (when (and (buffer-live-p buffer)
                            (eq token (buffer-local-value 'choicel--search-token buffer)))
-                  (let ((rows
+                  (let ((display-start (float-time))
+                        (rows
                          (when (and (not failure) (buffer-live-p source))
                            (with-current-buffer source
                              (cl-loop for entry in entries
@@ -380,6 +397,10 @@ Use the invoking buffer's active keymaps.  Include registered autoloads."
                         (choicel--render
                          (cl-subseq rows 0 (min choicel-max-results (length rows)))
                          "System One")))
+                    (puthash 'display (- (float-time) display-start) metrics)
+                    (choicel--metrics-finish
+                     metrics (if (or failure (not (buffer-live-p source)))
+                                 'fallback 'completed))
                     (when minibuffer-style
                       (choicel--queue-minibuffer buffer token))))))))
         (when (and (buffer-live-p buffer)
