@@ -59,4 +59,30 @@
         (choicel-describe-command)
         (should (eq described 'choicel-test-command))))))
 
+(ert-deftest choicel-indexes-autoload-without-loading ()
+  (let ((symbol (make-symbol "choicel-test-autoload")))
+    (unwind-protect
+        (progn
+          (intern (symbol-name symbol))
+          (setq symbol (intern (symbol-name symbol)))
+          (autoload symbol "choicel-test-nonexistent-package" "Open a view." t)
+          (should (assq symbol (choicel--commands)))
+          (should (autoloadp (symbol-function symbol))))
+      (unintern (symbol-name symbol) obarray))))
+
+(ert-deftest choicel-common-japanese-entry-queries ()
+  (let ((commands '((magit-status "Show repository status")
+                    (vc-dir "Show version control directory")
+                    (dired "Edit a directory")
+                    (find-file "Visit a file")
+                    (list-directory "List directory contents"))))
+    (should (eq (caar (choicel--search "gitを開きたい" commands)) 'magit-status))
+    (should (eq (caar (choicel--search "ディレクトリ一覧を開きたい" commands)) 'dired))
+    (should (eq (caar (choicel--search "フォルダを開きたい" commands)) 'dired))
+    (should (eq (caar (choicel--search "gitを開きたい"
+                                       (assq-delete-all 'magit-status commands)))
+                'vc-dir))
+    (should-not (assq 'magit-status (choicel--search "gitを開きたい"
+                                           '((vc-dir "Version control")))))))
+
 ;;; choicel-test.el ends here
