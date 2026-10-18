@@ -24,8 +24,9 @@
 
 (defcustom choicel-display-style 'normal
   "How to display results, independently of action and key bindings.
-Normal follows Emacs display rules.  Full-frame temporarily uses one window."
-  :group 'choicel :type '(choice (const normal) (const full-frame)))
+Normal follows Emacs display rules.  Full-frame temporarily uses one window.
+Minibuffer uses the user's completion UI without a results window."
+  :group 'choicel :type '(choice (const normal) (const full-frame) (const minibuffer)))
 
 (defcustom choicel-default-action 'help
   "Action taken by `choicel-default-action' on the selected result."
@@ -37,6 +38,8 @@ Normal follows Emacs display rules.  Full-frame temporarily uses one window."
 (defvar-local choicel--search-token nil)
 (defvar-local choicel--window-configuration nil)
 (defvar-local choicel--source-window nil)
+(defvar-local choicel--selection-timer nil)
+(defvar-local choicel--prefix nil)
 
 (defun choicel--restore-layout ()
   "Cancel pending work and restore the search's original layout."
@@ -87,15 +90,23 @@ Pass PREFIX to the command, including prompts for its normal arguments."
 
 (defun choicel--cancel-pending ()
   "Cancel work belonging to this results buffer."
+  (when choicel--selection-timer (cancel-timer choicel--selection-timer))
+  (setq choicel--selection-timer nil)
   (when choicel--cancel-search (funcall choicel--cancel-search))
   (setq choicel--cancel-search nil choicel--search-token nil))
 
 (defun choicel-cancel-search ()
-  "Cancel System One search and keep the current keyword results."
+  "Cancel System One search or a pending minibuffer selection."
   (interactive)
-  (choicel--cancel-pending)
-  (setq header-line-format
-        (concat "System One cancelled | Keyword results | " (choicel--action-hints))))
+  (let ((buffer (if (derived-mode-p 'choicel-results-mode)
+                    (current-buffer) (get-buffer "*choicel*"))))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (choicel--cancel-pending)
+        (setq header-line-format
+              (concat "System One cancelled | Keyword results | "
+                      (choicel--action-hints)))))
+    (message "Choicel search cancelled")))
 
 (defun choicel--commands ()
   "Collect loaded commands and registered interactive autoloads.
@@ -219,6 +230,75 @@ Do not load packages merely to index their commands."
      (choicel-search-again . "search") (choicel-quit . "quit"))
    "  "))
 
+(defun choicel--minibuffer-select (buffer token)
+  "Select a result from BUFFER for search TOKEN using standard completion."
+  (when (and (buffer-live-p buffer)
+             (eq token (buffer-local-value 'choicel--search-token buffer)))
+    (with-current-buffer buffer
+      (unwind-protect
+          (if (not (buffer-live-p choicel--source-buffer))
+              (message "Choicel: the original buffer has been closed")
+            (let* ((entries tabulated-list-entries)
+                   (names (mapcar (lambda (entry) (symbol-name (car entry))) entries))
+                   (annotation
+                    (lambda (name)
+                      (let* ((entry (cl-find name entries
+                                             :key (lambda (row) (symbol-name (car row)))
+                                             :test #'equal))
+                             (columns (cadr entry)))
+                        (when columns
+                          (format "  [%s] %s" (aref columns 1)
+                                  (truncate-string-to-width (aref columns 2) 100 nil nil t))))))
+                   (table
+                    (lambda (string predicate action)
+                      (if (eq action 'metadata)
+                          `(metadata (category . choicel-command)
+                                     (display-sort-function . identity)
+                                     (cycle-sort-function . identity)
+                                     (annotation-function . ,annotation))
+                        (complete-with-action action names string predicate)))))
+              (if (null names)
+                  (message "Choicel: no matches; try another search phrase")
+                (let* ((selection (completing-read
+                                   (format "Choicel (%s): " choicel-default-action)
+                                   table nil t nil nil (car names)))
+                       (entry (cl-find selection entries
+                                       :key (lambda (row) (symbol-name (car row)))
+                                       :test #'equal))
+                       (command (car entry))
+                       (prefix choicel--prefix))
+                  (unless (and (eq token choicel--search-token) (commandp command))
+                    (user-error "Choicel selection is no longer available"))
+                  (pcase choicel-default-action
+                    ('help (choicel--restore-layout) (describe-function command))
+                    ('execute
+                     (goto-char (point-min))
+                     (while (and (not (eobp))
+                                 (not (eq (tabulated-list-get-id) command)))
+                       (forward-line 1))
+                     (unless (eq (tabulated-list-get-id) command)
+                       (user-error "Choicel result is no longer available"))
+                     (choicel-execute-command prefix))
+                    (_ (user-error "Unknown choicel default action")))))))
+        (when (eq token choicel--search-token) (choicel--restore-layout))))))
+
+(defun choicel--queue-minibuffer (buffer token)
+  "Defer selection for BUFFER and TOKEN until no other minibuffer is active."
+  (when (and (buffer-live-p buffer)
+             (eq token (buffer-local-value 'choicel--search-token buffer)))
+    (with-current-buffer buffer
+      (setq choicel--selection-timer
+            (run-with-idle-timer
+             0.1 nil
+             (lambda ()
+               (when (and (buffer-live-p buffer)
+                          (eq token (buffer-local-value 'choicel--search-token buffer)))
+                 (if (active-minibuffer-window)
+                     (choicel--queue-minibuffer buffer token)
+                   (condition-case nil
+                       (choicel--minibuffer-select buffer token)
+                     (quit (message "Choicel cancelled")))))))))))
+
 ;;;###autoload
 (defun choicel (query)
   "Find commands matching QUERY, displaying them for an explicit user action.
@@ -251,6 +331,10 @@ Use the invoking buffer's active keymaps.  Include registered autoloads."
                                                when (and (boundp mode) (symbol-value mode))
                                                collect (symbol-name mode)))))))
          (buffer (get-buffer-create "*choicel*"))
+         (minibuffer-style (eq choicel-display-style 'minibuffer))
+         (prefix current-prefix-arg)
+         (use-systemone (and (memq choicel-backend '(auto systemone))
+                             (or choicel-systemone-url (eq choicel-backend 'systemone))))
          (token (make-symbol "choicel-search")))
     (with-current-buffer buffer
       (choicel--cancel-pending)
@@ -258,15 +342,19 @@ Use the invoking buffer's active keymaps.  Include registered autoloads."
       (setq choicel--source-buffer source choicel--query query
             choicel--window-configuration configuration
             choicel--source-window source-window
+            choicel--prefix prefix
             choicel--search-token token)
       (add-hook 'kill-buffer-hook #'choicel--cancel-pending nil t)
       (add-hook 'change-major-mode-hook #'choicel--cancel-pending nil t)
       (choicel--render results "Keyword search"))
-    (if (eq choicel-display-style 'full-frame)
-        (progn (switch-to-buffer buffer) (delete-other-windows))
-      (pop-to-buffer buffer))
-    (when (and (memq choicel-backend '(auto systemone))
-               (or choicel-systemone-url (eq choicel-backend 'systemone)))
+    (unless minibuffer-style
+      (if (eq choicel-display-style 'full-frame)
+          (progn (switch-to-buffer buffer) (delete-other-windows))
+        (pop-to-buffer buffer)))
+    (when (and minibuffer-style (not use-systemone))
+      (choicel--minibuffer-select buffer token))
+    (when use-systemone
+      (when minibuffer-style (message "Choicel: System One searching…"))
       (with-current-buffer buffer
         (setq header-line-format "System One searching… | Keyword results below | C-c C-k: cancel"))
       (let ((cancel
@@ -291,7 +379,9 @@ Use the invoking buffer's active keymaps.  Include registered autoloads."
                                                    (or failure "Source buffer closed")))
                         (choicel--render
                          (cl-subseq rows 0 (min choicel-max-results (length rows)))
-                         "System One")))))))))
+                         "System One")))
+                    (when minibuffer-style
+                      (choicel--queue-minibuffer buffer token))))))))
         (when (and (buffer-live-p buffer)
                    (eq token (buffer-local-value 'choicel--search-token buffer)))
           (with-current-buffer buffer (setq choicel--cancel-search cancel)))))))
